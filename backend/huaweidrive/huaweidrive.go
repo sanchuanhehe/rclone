@@ -556,7 +556,7 @@ func (f *Fs) FindLeaf(ctx context.Context, pathID, leaf string) (pathIDOut strin
 	encodedLeaf := f.opt.Enc.FromStandardName(leaf)
 	// Find the leaf in pathID
 	found, err = f.listAll(ctx, pathID, func(item *api.File) bool {
-		if strings.EqualFold(item.FileName, encodedLeaf) && item.IsDir() {
+		if item.FileName == encodedLeaf && item.IsDir() {
 			pathIDOut = item.ID
 			return true
 		}
@@ -1266,7 +1266,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 	// Set parent folders as URL query parameters (not in JSON body)
 	// Per Huawei API docs: addParentFolder and removeParentFolder are query parameters
-	if needsDirMove && len(currentParents) > 0 {
+	if needsDirMove && len(currentParents) > 0 && dstDirectoryID != "" {
 		opts.Parameters.Set("addParentFolder", dstDirectoryID)
 		opts.Parameters.Set("removeParentFolder", currentParents[0])
 	}
@@ -1586,7 +1586,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.Fi
 	found, err := f.listAll(ctx, directoryID, func(item *api.File) bool {
 		// Convert the API filename to standard name for comparison
 		standardName := f.opt.Enc.ToStandardName(item.FileName)
-		if strings.EqualFold(standardName, leaf) && !item.IsDir() {
+		if standardName == leaf && !item.IsDir() {
 			info = item
 			return true
 		}
@@ -2372,14 +2372,10 @@ func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.
 			continue
 		}
 		if result.NewStartCursor != "" {
-			// Only advance the cursor if we actually got changes.
-			// The Huawei Drive Changes API has eventual consistency -
-			// some changes may not yet be visible. By keeping the old
-			// cursor when no changes are returned, we can pick up
-			// delayed changes on the next poll.
-			if len(result.Changes) > 0 {
-				return result.NewStartCursor, nil
-			}
+			// Always advance to the new start cursor provided by the API.
+			// Keeping a stale cursor risks CURSOR_EXPIRED on the next poll,
+			// which would cause a gap in change notifications.
+			return result.NewStartCursor, nil
 		}
 		return cursor, nil
 	}

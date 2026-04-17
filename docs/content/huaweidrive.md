@@ -164,6 +164,8 @@ Rclone uses the following OAuth2 scopes when accessing Huawei Drive:
 - `openid` - OpenID Connect authentication
 - `profile` - Access to basic profile information
 
+The `drive.file` scope is included in the default set used by rclone.
+
 Alternative scopes available (not used by rclone by default):
 
 - `https://www.huawei.com/auth/drive.appdata` - Access to application data folder
