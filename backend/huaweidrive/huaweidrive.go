@@ -1507,6 +1507,11 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 	if t != hash.SHA256 {
 		return "", hash.ErrUnsupported
 	}
+	if o.sha256 == "" && o.size == 0 {
+		// Huawei Drive API does not return SHA256 for 0-byte files,
+		// so return the well-known SHA256 of empty content.
+		return "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", nil
+	}
 	return o.sha256, nil
 }
 
