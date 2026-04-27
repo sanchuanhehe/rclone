@@ -14,18 +14,14 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/fstest/fstests"
 	"github.com/rclone/rclone/lib/encoder"
 )
 
 // TestIntegration runs integration tests against the remote
 func TestIntegration(t *testing.T) {
-	if *fstest.RemoteName == "" {
-		t.Skip("Skipping as no remote name")
-	}
 	fstests.Run(t, &fstests.Opt{
-		RemoteName:               *fstest.RemoteName,
+		RemoteName:               "TestHuaweiDrive:",
 		NilObject:                (*Object)(nil),
 		SkipBadWindowsCharacters: true,
 	})

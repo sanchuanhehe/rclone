@@ -1,7 +1,7 @@
 ---
 title: "Huawei Drive"
 description: "Rclone docs for Huawei Drive"
-versionIntroduced: "v1.68"
+versionIntroduced: "v1.74"
 ---
 
 # {{< icon "fas fa-cloud" >}} Huawei Drive
