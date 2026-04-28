@@ -1264,11 +1264,14 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		moveReq.FileName = f.opt.Enc.FromStandardName(dstLeaf)
 	}
 
-	// Set parent folders as URL query parameters (not in JSON body)
-	// Per Huawei API docs: addParentFolder and removeParentFolder are query parameters
+	// Set parent folders in the JSON body as arrays.
+	// Per Huawei Drive filesupdate API docs, addParentFolder and removeParentFolder
+	// are body parameters (arrays of folder IDs), not query parameters. They must
+	// either both be empty (pure rename) or both be non-empty (move). Sending only
+	// one results in: "addParentFolder and removeParentFolder are both empty or neither".
 	if needsDirMove && len(currentParents) > 0 && dstDirectoryID != "" {
-		opts.Parameters.Set("addParentFolder", dstDirectoryID)
-		opts.Parameters.Set("removeParentFolder", currentParents[0])
+		moveReq.AddParentFolder = []string{dstDirectoryID}
+		moveReq.RemoveParentFolder = []string{currentParents[0]}
 	}
 
 	// Execute the API call
@@ -1344,11 +1347,14 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		FileName: f.opt.Enc.FromStandardName(dstLeaf),
 	}
 
-	// Set parent folders as URL query parameters if they're different
-	// Per Huawei API docs: addParentFolder and removeParentFolder are query parameters
-	if dstDirectoryID != srcDirectoryID {
-		opts.Parameters.Set("addParentFolder", dstDirectoryID)
-		opts.Parameters.Set("removeParentFolder", srcDirectoryID)
+	// Set parent folders in the JSON body as arrays if they're different.
+	// Per Huawei Drive filesupdate API docs, addParentFolder and removeParentFolder
+	// are body parameters (arrays of folder IDs), not query parameters. They must
+	// either both be empty (pure rename) or both be non-empty (move). Sending only
+	// one results in: "addParentFolder and removeParentFolder are both empty or neither".
+	if dstDirectoryID != srcDirectoryID && srcDirectoryID != "" && dstDirectoryID != "" {
+		moveReq.AddParentFolder = []string{dstDirectoryID}
+		moveReq.RemoveParentFolder = []string{srcDirectoryID}
 	}
 
 	var info *api.File
