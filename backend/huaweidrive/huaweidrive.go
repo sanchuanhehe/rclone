@@ -2224,6 +2224,9 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 			if strings.Contains(errMsg, "21084031") || strings.Contains(errMsg, "DATA_MIGRATING") {
 				return true, err
 			}
+			if strings.Contains(errMsg, "21084038") || strings.Contains(errMsg, "OUTER_SERVICE_ERROR") {
+				return true, err
+			}
 			return false, fserrors.NoRetryError(fmt.Errorf("forbidden: %w", err))
 		case 404:
 			return false, fserrors.NoRetryError(fmt.Errorf("not found: %w", err))

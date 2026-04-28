@@ -368,7 +368,8 @@ func TestErrorHandling(t *testing.T) {
 		{"insufficient_scope_403", 403, "INSUFFICIENT_SCOPE", true, "insufficient OAuth scope"},
 		{"insufficient_permission_403", 403, "INSUFFICIENT_PERMISSION", true, "insufficient permissions"},
 		{"agreement_not_signed_403", 403, "AGREEMENT_NOT_SIGNED", true, "user agreement not signed"},
-		{"data_migrating_403", 403, "DATA_MIGRATING", false, ""}, // Should allow retry
+		{"data_migrating_403", 403, "DATA_MIGRATING", false, ""},           // Should allow retry
+		{"outer_service_error_403", 403, "OUTER_SERVICE_ERROR", false, ""}, // Should allow retry
 		{"cursor_expired_410", 410, "CURSOR_EXPIRED", true, "cursor expired"},
 		{"temp_data_cleared_410", 410, "TEMP_DATA_CLEARED", true, "temporary data cleared"},
 		{"server_temp_error_500", 500, "SERVER_TEMP_ERROR", false, ""},                 // Should allow retry

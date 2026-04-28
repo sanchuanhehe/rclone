@@ -663,6 +663,7 @@ backends:
  - backend: "huaweidrive"
    remote: "TestHuaweiDrive:"
    fastlist: true
+   listretries: 5
  - backend: "shade"
    remote: "TestShade:"
    fastlist: false
