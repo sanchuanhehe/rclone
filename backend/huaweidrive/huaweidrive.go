@@ -1248,15 +1248,6 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	// the source path will no longer be valid for metadata reads
 	mergedMeta, _ := fs.GetMetadataOptions(ctx, f, src, fs.MetadataAsOpenOptions(ctx))
 
-	// Prepare the API request
-	opts := rest.Opts{
-		Method: "PATCH",
-		Path:   "/files/" + srcObj.id,
-		Parameters: url.Values{
-			"fields": []string{"*"},
-		},
-	}
-
 	moveReq := api.UpdateFileRequest{}
 
 	// Set filename if we need to rename
@@ -1264,22 +1255,18 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		moveReq.FileName = f.opt.Enc.FromStandardName(dstLeaf)
 	}
 
-	// Set parent folders in the JSON body as arrays.
-	// Per Huawei Drive filesupdate API docs, addParentFolder and removeParentFolder
-	// are body parameters (arrays of folder IDs), not query parameters. They must
-	// either both be empty (pure rename) or both be non-empty (move). Sending only
-	// one results in: "addParentFolder and removeParentFolder are both empty or neither".
-	if needsDirMove && len(currentParents) > 0 && dstDirectoryID != "" {
-		moveReq.AddParentFolder = []string{dstDirectoryID}
-		moveReq.RemoveParentFolder = []string{currentParents[0]}
-	}
-
-	// Execute the API call
 	var info *api.File
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallJSON(ctx, &opts, &moveReq, &info)
-		return shouldRetry(ctx, resp, err)
-	})
+	if needsDirMove {
+		if len(currentParents) == 0 || dstDirectoryID == "" {
+			return nil, fs.ErrorCantMove
+		}
+		info, err = f.updateFile(ctx, srcObj.id, url.Values{
+			"addParentFolder":    []string{dstDirectoryID},
+			"removeParentFolder": []string{currentParents[0]},
+		}, &moveReq)
+	} else {
+		info, err = f.updateFile(ctx, srcObj.id, nil, &moveReq)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("move operation failed: %w", err)
 	}
@@ -1311,6 +1298,23 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	return dstObj, nil
 }
 
+func (f *Fs) updateFile(ctx context.Context, fileID string, parameters url.Values, req *api.UpdateFileRequest) (info *api.File, err error) {
+	if parameters == nil {
+		parameters = url.Values{}
+	}
+	parameters.Set("fields", "*")
+	opts := rest.Opts{
+		Method:     "PATCH",
+		Path:       "/files/" + fileID,
+		Parameters: parameters,
+	}
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err := f.srv.CallJSON(ctx, &opts, req, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	return info, err
+}
+
 // DirMove moves src, srcRemote to this remote at dstRemote
 // using server-side move operations.
 //
@@ -1334,34 +1338,22 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 
 	fs.Debugf(f, "DirMove: srcID=%q srcDirectoryID=%q srcLeaf=%q dstDirectoryID=%q dstLeaf=%q", srcID, srcDirectoryID, srcLeaf, dstDirectoryID, dstLeaf)
 
-	// Move the directory by updating parent folders
-	opts := rest.Opts{
-		Method: "PATCH",
-		Path:   "/files/" + srcID,
-		Parameters: url.Values{
-			"fields": []string{"*"},
-		},
-	}
-
 	moveReq := api.UpdateFileRequest{
 		FileName: f.opt.Enc.FromStandardName(dstLeaf),
 	}
 
-	// Set parent folders in the JSON body as arrays if they're different.
-	// Per Huawei Drive filesupdate API docs, addParentFolder and removeParentFolder
-	// are body parameters (arrays of folder IDs), not query parameters. They must
-	// either both be empty (pure rename) or both be non-empty (move). Sending only
-	// one results in: "addParentFolder and removeParentFolder are both empty or neither".
-	if dstDirectoryID != srcDirectoryID && srcDirectoryID != "" && dstDirectoryID != "" {
-		moveReq.AddParentFolder = []string{dstDirectoryID}
-		moveReq.RemoveParentFolder = []string{srcDirectoryID}
-	}
-
 	var info *api.File
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallJSON(ctx, &opts, &moveReq, &info)
-		return shouldRetry(ctx, resp, err)
-	})
+	if dstDirectoryID != srcDirectoryID {
+		if srcDirectoryID == "" || dstDirectoryID == "" {
+			return fmt.Errorf("can't move directory: source or destination parent ID is empty")
+		}
+		info, err = f.updateFile(ctx, srcID, url.Values{
+			"addParentFolder":    []string{dstDirectoryID},
+			"removeParentFolder": []string{srcDirectoryID},
+		}, &moveReq)
+	} else {
+		info, err = f.updateFile(ctx, srcID, nil, &moveReq)
+	}
 	if err != nil {
 		return err
 	}
