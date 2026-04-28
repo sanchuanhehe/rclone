@@ -9,9 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/adrg/xdg"
 	"github.com/coreos/go-semver/semver"
 
 	"github.com/rclone/rclone/fs"
@@ -613,4 +615,93 @@ func rcRunCommand(ctx context.Context, in Params) (out Params, err error) {
 
 	err = cmd.Run()
 	return nil, err
+}
+
+func init() {
+	Add(Call{
+		Path:  "core/disks",
+		Fn:    rcDisks,
+		Title: "List the local disks",
+		Help: `This does not take any parameters
+
+This call is for rclone GUI programs to enumerate local disks and
+important directories for doing transfers to and from. The list
+returned will include the root directory and the user's home directory
+and any mounted disks. The returned items should be usable directly as
+remotes.
+
+Returns:
+
+- disks
+    - This is an array of strings of local disk names
+`,
+	})
+}
+
+func mountOK(path string) bool {
+	if runtime.GOOS == "darwin" {
+		if strings.HasPrefix(path, "/Volumes/") {
+			return true
+		}
+	} else if runtime.GOOS == "windows" {
+		return true
+	} else { // Linux and all other unices
+		// Fedora/Arch/openSUSE standard
+		if strings.HasPrefix(path, "/run/media/") {
+			return true
+		}
+		// Ubuntu/Debian standard
+		if strings.HasPrefix(path, "/media/") {
+			return true
+		}
+		// Traditional unix standard
+		if strings.HasPrefix(path, "/mnt/") {
+			return true
+		}
+	}
+	return false
+}
+
+// Disks returns likely local disks and some other useful positions
+func rcDisks(ctx context.Context, in Params) (out Params, err error) {
+	disks := []string{}
+	add := func(s string) {
+		if s != "/" {
+			s, _ = strings.CutSuffix(s, "/")
+		}
+		if !slices.Contains(disks, s) {
+			disks = append(disks, s)
+		}
+	}
+
+	// Add home directory
+	home, err := os.UserHomeDir()
+	if err == nil {
+		add(home)
+	}
+
+	// Add root directory
+	if runtime.GOOS != "windows" {
+		add("/")
+	}
+
+	// Add mount points
+	for _, mount := range getMounts() {
+		if mountOK(mount) {
+			add(mount)
+		}
+	}
+
+	// Add user directories
+	add(xdg.UserDirs.Desktop)
+	add(xdg.UserDirs.Download)
+	add(xdg.UserDirs.Documents)
+	add(xdg.UserDirs.Music)
+	add(xdg.UserDirs.Pictures)
+	add(xdg.UserDirs.Videos)
+
+	out = Params{
+		"disks": disks,
+	}
+	return out, nil
 }
