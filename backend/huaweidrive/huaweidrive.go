@@ -315,84 +315,39 @@ func parsePath(path string) (root string) {
 	return
 }
 
-// nonexistentDirName is the virtual flag directory created by Huawei Drive API.
-// Its parentFolder points to the actual root directory ID.
-const nonexistentDirName = "nonexistent_dir"
+// rootAlias is the special file ID alias understood by the Huawei Drive API
+// to mean "this user's drive root". GET /files/root returns the metadata of
+// the real root folder, including its concrete id.
+const rootAlias = "root"
 
-// detectRootID discovers the root folder ID by listing files.
-// It first looks for the "nonexistent_dir" virtual flag whose parentFolder
-// points directly to the root. If that is not found, it falls back to
-// a heuristic: the parentFolder value that is not itself a file ID.
+// detectRootID discovers the user's drive root folder ID deterministically
+// by calling GET /files/root. The Huawei Drive API treats the literal
+// string "root" as an alias for the user's drive root, so this is the
+// authoritative way to obtain the real root id without any guessing.
 func (f *Fs) detectRootID(ctx context.Context) error {
 	opts := rest.Opts{
 		Method: "GET",
-		Path:   "/files",
+		Path:   "/files/" + rootAlias,
 		Parameters: url.Values{
-			"fields":     []string{"*"},
-			"containers": []string{"drive"},
-			"pageSize":   []string{"100"},
+			"fields": []string{"id,fileName,mimeType,parentFolder"},
 		},
 	}
 
-	var result api.FileList
+	var info api.File
 	err := f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallJSON(ctx, &opts, nil, &result)
+		resp, err := f.srv.CallJSON(ctx, &opts, nil, &info)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return fmt.Errorf("failed to list files for root detection: %w", err)
+		return fmt.Errorf("failed to resolve drive root via /files/root: %w", err)
 	}
 
-	if len(result.Files) == 0 {
-		fs.Debugf(f, "Could not detect root folder ID - no files found")
-		return nil
+	if info.ID == "" {
+		return fmt.Errorf("drive root response did not include an id")
 	}
 
-	// Primary: look for the "nonexistent_dir" virtual flag.
-	// Its parentFolder contains the root directory ID.
-	for _, file := range result.Files {
-		if file.FileName == nonexistentDirName && len(file.ParentFolder) > 0 {
-			f.rootFolderID = file.ParentFolder[0]
-			fs.Debugf(f, "Detected root folder ID from %s marker: %s", nonexistentDirName, f.rootFolderID)
-			return nil
-		}
-	}
-
-	// Fallback heuristic: collect all file IDs and all parent IDs
-	fileIDs := make(map[string]bool, len(result.Files))
-	parentCounts := make(map[string]int)
-	for _, file := range result.Files {
-		fileIDs[file.ID] = true
-		for _, parent := range file.ParentFolder {
-			parentCounts[parent]++
-		}
-	}
-
-	// The root folder ID is a parentFolder value that is NOT itself a file ID.
-	var bestID string
-	var bestCount int
-	for id, count := range parentCounts {
-		if !fileIDs[id] && count > bestCount {
-			bestID = id
-			bestCount = count
-		}
-	}
-
-	// If all parents are also file IDs (deep nesting), use most common parent
-	if bestID == "" {
-		for id, count := range parentCounts {
-			if count > bestCount {
-				bestID = id
-				bestCount = count
-			}
-		}
-	}
-
-	if bestID != "" {
-		f.rootFolderID = bestID
-		fs.Debugf(f, "Detected root folder ID: %s (from %d files, heuristic)", bestID, bestCount)
-	}
-
+	f.rootFolderID = info.ID
+	fs.Debugf(f, "Resolved drive root folder ID: %s", f.rootFolderID)
 	return nil
 }
 
@@ -479,11 +434,9 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		// Detect root folder ID by listing files
 		err = f.detectRootID(ctx)
 		if err != nil {
-			fs.Debugf(f, "Failed to detect root folder ID: %v", err)
+			return nil, fmt.Errorf("failed to detect root folder ID: %w", err)
 		}
-		if f.rootFolderID != "" {
-			fs.Debugf(f, "'root_folder_id = %s' - save this in the config to speed up startup", f.rootFolderID)
-		}
+		fs.Debugf(f, "'root_folder_id = %s' - save this in the config to speed up startup", f.rootFolderID)
 	}
 
 	// Detect regional domain via About:get
@@ -626,13 +579,13 @@ func (f *Fs) listAll(ctx context.Context, dirID string, fn listAllFn) (found boo
 		return f.listDirectory(ctx, dirID, fn)
 	}
 
-	// For root directory (empty dirID), use detected root folder ID
-	if f.rootFolderID != "" {
-		return f.listDirectory(ctx, f.rootFolderID, fn)
+	// For root directory (empty dirID), use detected root folder ID.
+	// detectRootID always resolves a concrete id via /files/root, so this
+	// must be set before any list call reaches us.
+	if f.rootFolderID == "" {
+		return false, fmt.Errorf("listAll called with empty dirID and no root folder ID resolved")
 	}
-
-	// Fallback: list without parentFolder filter
-	return f.listRootDirectory(ctx, fn)
+	return f.listDirectory(ctx, f.rootFolderID, fn)
 }
 
 // listDirectory lists files in a specific directory using parentFolder filter
@@ -685,10 +638,6 @@ func (f *Fs) listDirectoryWithFilter(ctx context.Context, dirID string, extraFil
 
 		// Process files directly - no need for further filtering since API does it for us
 		for _, item := range result.Files {
-			// Skip the nonexistent_dir virtual flag created by Huawei Drive API
-			if item.FileName == nonexistentDirName {
-				continue
-			}
 			if fn(&item) {
 				found = true
 				return found, nil
@@ -700,112 +649,6 @@ func (f *Fs) listDirectoryWithFilter(ctx context.Context, dirID string, extraFil
 			break
 		}
 		opts.Parameters.Set("pageToken", result.NextPageToken)
-	}
-
-	return found, nil
-}
-
-// listRootDirectory lists files at the root level when rootFolderID is not known.
-// It lists all files and returns those that appear to be at the top level.
-func (f *Fs) listRootDirectory(ctx context.Context, fn listAllFn) (found bool, err error) {
-	opts := rest.Opts{
-		Method: "GET",
-		Path:   "/files",
-		Parameters: url.Values{
-			"fields":     []string{"*"},
-			"containers": []string{"drive"},
-		},
-	}
-
-	if f.opt.ListChunk > 0 && f.opt.ListChunk <= 1000 {
-		opts.Parameters.Set("pageSize", strconv.Itoa(f.opt.ListChunk))
-	}
-
-	// Collect all files to detect root folder ID from parentFolder values
-	var allFiles []api.File
-	for {
-		var result api.FileList
-		err = f.pacer.Call(func() (bool, error) {
-			resp, err := f.srv.CallJSON(ctx, &opts, nil, &result)
-			return shouldRetry(ctx, resp, err)
-		})
-		if err != nil {
-			return false, fmt.Errorf("couldn't list root directory: %w", err)
-		}
-		allFiles = append(allFiles, result.Files...)
-		if result.NextPageToken == "" {
-			break
-		}
-		opts.Parameters.Set("pageToken", result.NextPageToken)
-	}
-
-	// Primary: detect root folder ID from "nonexistent_dir" marker
-	var rootID string
-	for _, file := range allFiles {
-		if file.FileName == nonexistentDirName && len(file.ParentFolder) > 0 {
-			rootID = file.ParentFolder[0]
-			fs.Debugf(f, "Detected root folder ID from %s marker in listing: %s", nonexistentDirName, rootID)
-			break
-		}
-	}
-
-	// Fallback heuristic: the parentFolder value that is NOT a file ID
-	if rootID == "" {
-		fileIDs := make(map[string]bool, len(allFiles))
-		parentCounts := make(map[string]int)
-		for _, file := range allFiles {
-			fileIDs[file.ID] = true
-			for _, parent := range file.ParentFolder {
-				parentCounts[parent]++
-			}
-		}
-		var maxCount int
-		for id, count := range parentCounts {
-			if !fileIDs[id] && count > maxCount {
-				rootID = id
-				maxCount = count
-			}
-		}
-		// If all parents are file IDs
-		if rootID == "" {
-			for id, count := range parentCounts {
-				if count > maxCount {
-					rootID = id
-					maxCount = count
-				}
-			}
-		}
-	}
-
-	if rootID != "" {
-		f.rootFolderID = rootID
-		fs.Debugf(f, "Detected root folder ID from listing: %s", rootID)
-		// Now filter to only root-level files
-		for i := range allFiles {
-			// Skip the nonexistent_dir virtual flag
-			if allFiles[i].FileName == nonexistentDirName {
-				continue
-			}
-			for _, parent := range allFiles[i].ParentFolder {
-				if parent == rootID {
-					if fn(&allFiles[i]) {
-						found = true
-					}
-					break
-				}
-			}
-		}
-	} else {
-		// No parentFolder info available, return all files
-		for i := range allFiles {
-			// Skip the nonexistent_dir virtual flag
-			if allFiles[i].FileName == nonexistentDirName {
-				continue
-			}
-			if fn(&allFiles[i]) {
-				found = true
-			}
-		}
 	}
 
 	return found, nil
@@ -905,6 +748,10 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	if err != nil {
 		return nil, err
 	}
+	directoryID, err = f.ensureDirectoryID(ctx, dir, directoryID)
+	if err != nil {
+		return nil, err
+	}
 	var iErr error
 	_, err = f.listAll(ctx, directoryID, func(info *api.File) bool {
 		remote := path.Join(dir, f.opt.Enc.ToStandardName(info.FileName))
@@ -939,6 +786,14 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 		return nil, iErr
 	}
 	return entries, nil
+}
+
+func (f *Fs) ensureDirectoryID(ctx context.Context, dir, directoryID string) (string, error) {
+	if f.root == "" || f.rootFolderID == "" || directoryID != f.rootFolderID {
+		return directoryID, nil
+	}
+	f.dirCache.ResetRoot()
+	return f.dirCache.FindDir(ctx, dir, false)
 }
 
 // Creates from the parameters passed in a half finished Object which
@@ -1271,12 +1126,22 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		return nil, fmt.Errorf("move operation failed: %w", err)
 	}
 
-	// Verify cross-directory moves actually worked
-	if needsDirMove && len(info.ParentFolder) > 0 {
-		actualParent := info.ParentFolder[0]
-		if actualParent != dstDirectoryID {
-			fs.Debugf(f, "Cross-directory move failed: expected parent=%q, got=%q. Falling back to copy+delete.",
-				dstDirectoryID, actualParent)
+	// Verify cross-directory moves actually worked.
+	if needsDirMove {
+		if info == nil || len(info.ParentFolder) == 0 {
+			fs.Debugf(f, "Cross-directory move returned no parentFolder. Falling back to copy+delete.")
+			return nil, fs.ErrorCantMove
+		}
+		parentFound := false
+		for _, actualParent := range info.ParentFolder {
+			if actualParent == dstDirectoryID {
+				parentFound = true
+				break
+			}
+		}
+		if !parentFound {
+			fs.Debugf(f, "Cross-directory move failed: expected parent=%q, got=%v. Falling back to copy+delete.",
+				dstDirectoryID, info.ParentFolder)
 			return nil, fs.ErrorCantMove
 		}
 	}
@@ -1409,6 +1274,10 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 // of listing recursively that doing a directory traversal.
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
 	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
+	if err != nil {
+		return err
+	}
+	directoryID, err = f.ensureDirectoryID(ctx, dir, directoryID)
 	if err != nil {
 		return err
 	}
@@ -1696,17 +1565,21 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		in = tmpFile
 	}
 
-	// Determine upload method based on size
-	// Cap multipart upload at 20 MiB (Huawei Drive API limit)
-	cutoff := int64(o.fs.opt.UploadCutoff)
-	const maxMultipartSize = 20 * 1024 * 1024
-	if cutoff > maxMultipartSize {
-		cutoff = maxMultipartSize
-	}
-	if size < cutoff {
-		err = o.uploadSimple(ctx, in, leaf, directoryID, size, src.ModTime(ctx), src)
+	if size == 0 {
+		err = o.uploadEmpty(ctx, leaf, directoryID, src)
 	} else {
-		err = o.uploadResume(ctx, in, leaf, directoryID, size, src.ModTime(ctx), src)
+		// Determine upload method based on size
+		// Cap multipart upload at 20 MiB (Huawei Drive API limit)
+		cutoff := int64(o.fs.opt.UploadCutoff)
+		const maxMultipartSize = 20 * 1024 * 1024
+		if cutoff > maxMultipartSize {
+			cutoff = maxMultipartSize
+		}
+		if size < cutoff {
+			err = o.uploadSimple(ctx, in, leaf, directoryID, size, src.ModTime(ctx), src)
+		} else {
+			err = o.uploadResume(ctx, in, leaf, directoryID, size, src.ModTime(ctx), src)
+		}
 	}
 
 	// Handle metadata if upload was successful
@@ -1723,6 +1596,61 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 
 	return err
+}
+
+// uploadEmpty creates a zero-byte file using metadata-only file creation.
+func (o *Object) uploadEmpty(ctx context.Context, leaf, directoryID string, src fs.ObjectInfo) error {
+	if leaf == "" {
+		return fmt.Errorf("invalid filename: cannot be empty")
+	}
+
+	if o.id != "" {
+		if err := o.Remove(ctx); err != nil && !errors.Is(err, fs.ErrorObjectNotFound) {
+			return fmt.Errorf("failed to replace existing file %q with empty file: %w", leaf, err)
+		}
+		o.id = ""
+	}
+
+	mimeType := "application/octet-stream"
+	if src != nil {
+		if mimeTyper, ok := src.(fs.MimeTyper); ok {
+			if srcMimeType := mimeTyper.MimeType(ctx); srcMimeType != "" {
+				mimeType = srcMimeType
+			}
+		}
+	}
+	if detectedMimeType := mime.TypeByExtension(path.Ext(leaf)); detectedMimeType != "" && mimeType == "application/octet-stream" {
+		mimeType = detectedMimeType
+	}
+
+	req := api.CreateFolderRequest{
+		FileName: leaf,
+		MimeType: mimeType,
+	}
+	if directoryID != "" {
+		req.ParentFolder = []string{directoryID}
+	}
+
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   "/files",
+		Parameters: url.Values{
+			"fields": []string{"*"},
+		},
+	}
+
+	var info *api.File
+	err := o.fs.pacer.Call(func() (bool, error) {
+		resp, err := o.fs.srv.CallJSON(ctx, &opts, &req, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create empty file %q: %w", leaf, err)
+	}
+	if info == nil {
+		return fmt.Errorf("no file info returned when creating empty file %q", leaf)
+	}
+	return o.setMetaData(info)
 }
 
 // uploadSimple uploads a file using simple upload for files < upload_cutoff

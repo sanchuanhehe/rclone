@@ -750,14 +750,16 @@ func TestUploadTypes(t *testing.T) {
 		{"small_file_multipart", 1024, 20 * fs.Mebi, "multipart"},
 		{"large_file_resume", int64(100 * fs.Mebi), 20 * fs.Mebi, "resume"},
 		{"exact_cutoff_resume", int64(20 * fs.Mebi), 20 * fs.Mebi, "resume"},
-		{"zero_size_multipart", 0, 20 * fs.Mebi, "multipart"},
+		{"zero_size_metadata", 0, 20 * fs.Mebi, "metadata"},
 		{"negative_size_resume", -1, 20 * fs.Mebi, "resume"}, // Unknown size
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			var actualType string
-			if tc.fileSize >= 0 && tc.fileSize < int64(tc.cutoff) {
+			if tc.fileSize == 0 {
+				actualType = "metadata"
+			} else if tc.fileSize > 0 && tc.fileSize < int64(tc.cutoff) {
 				actualType = "multipart"
 			} else {
 				actualType = "resume"
