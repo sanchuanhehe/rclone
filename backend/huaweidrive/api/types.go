@@ -132,6 +132,7 @@ type CreateFolderRequest struct {
 	Favorite     bool                   `json:"favorite,omitempty"`
 	Properties   map[string]interface{} `json:"properties,omitempty"`
 	AppSettings  map[string]interface{} `json:"appSettings,omitempty"`
+	AutoRename   int                    `json:"autoRename,omitempty"`
 }
 
 // UpdateFileRequest represents request to update a file

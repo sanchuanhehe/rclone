@@ -836,7 +836,41 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		return nil, err
 	}
 	// The object doesn't exist so create it
-	return f.PutUnchecked(ctx, in, src, options...)
+	o, err := f.PutUnchecked(ctx, in, src, options...)
+	if err == nil {
+		return o, nil
+	}
+	// PutUnchecked may fail because a sibling goroutine raced us and a file
+	// with the same name already exists on the server (the server rejects
+	// auto-rename, see uploadMultipart). Recover by locating the existing
+	// object and updating it.
+	if !isFileExistsErr(err) {
+		return nil, err
+	}
+	existingObj, lookupErr := f.newObjectWithInfo(ctx, src.Remote(), nil)
+	if lookupErr != nil {
+		return nil, err
+	}
+	if updateErr := existingObj.Update(ctx, in, src, options...); updateErr != nil {
+		return nil, updateErr
+	}
+	return existingObj, nil
+}
+
+// isFileExistsErr reports whether err is the Huawei Drive "file already
+// exists" / "auto-rename rejected" error returned when we set autoRename=3.
+func isFileExistsErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// 21004014 / FILENAME_EXISTED is the documented duplicate-name code.
+	return strings.Contains(msg, "21004014") ||
+		strings.Contains(msg, "FILENAME_EXISTED") ||
+		strings.Contains(msg, "FILE_NAME_EXISTED") ||
+		strings.Contains(msg, "FILE_EXIST") ||
+		strings.Contains(msg, "FILE_ALREADY_EXIST") ||
+		strings.Contains(msg, "DUPLICATE_FILE_NAME")
 }
 
 // PutUnchecked the object into the container
@@ -1630,6 +1664,10 @@ func (o *Object) uploadEmpty(ctx context.Context, leaf, directoryID string, src 
 	if directoryID != "" {
 		req.ParentFolder = []string{directoryID}
 	}
+	// Reject server-side auto-rename on duplicate filenames; see uploadMultipart.
+	if o.id == "" {
+		req.AutoRename = 3
+	}
 
 	opts := rest.Opts{
 		Method: "POST",
@@ -1699,6 +1737,13 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, direct
 	// Set parent folder
 	if directoryID != "" {
 		metadata["parentFolder"] = []string{directoryID}
+	}
+
+	// Reject server-side auto-rename on duplicate filenames so the caller can
+	// detect conflicts and decide what to do (instead of getting a silently
+	// renamed "file (1)").
+	if o.id == "" {
+		metadata["autoRename"] = 3
 	}
 
 	// Create multipart form
@@ -1834,6 +1879,11 @@ func (o *Object) uploadResume(ctx context.Context, in io.Reader, leaf, directory
 
 	if directoryID != "" {
 		metadata["parentFolder"] = []string{directoryID}
+	}
+
+	// Reject server-side auto-rename on duplicate filenames; see uploadMultipart.
+	if o.id == "" {
+		metadata["autoRename"] = 3
 	}
 
 	var resp *http.Response
