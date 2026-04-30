@@ -1742,13 +1742,13 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, direct
 		return fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
+	bodyBytes := buf.Bytes()
 	opts := rest.Opts{
 		Method: "POST",
 		Parameters: url.Values{
 			"uploadType": []string{"multipart"},
 			"fields":     []string{"*"},
 		},
-		Body:        bytes.NewReader(buf.Bytes()),
 		ContentType: fmt.Sprintf("multipart/related; boundary=%s", writer.Boundary()),
 		RootURL:     o.fs.uploadURL,
 	}
@@ -1764,6 +1764,7 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, direct
 
 	var info *api.File
 	err = o.fs.pacer.Call(func() (bool, error) {
+		opts.Body = bytes.NewReader(bodyBytes)
 		resp, err := srv.CallJSON(ctx, &opts, nil, &info)
 		return shouldRetry(ctx, resp, err)
 	})
@@ -1877,7 +1878,6 @@ func (o *Object) uploadResume(ctx context.Context, in io.Reader, leaf, directory
 			Method:  "PUT",
 			RootURL: location,
 			Path:    "", // Empty path since RootURL contains the full URL
-			Body:    bytes.NewReader(chunk),
 			ExtraHeaders: map[string]string{
 				"Content-Range":  fmt.Sprintf("bytes %d-%d/%d", offset, end, size),
 				"Content-Length": strconv.Itoa(n),
@@ -1888,6 +1888,7 @@ func (o *Object) uploadResume(ctx context.Context, in io.Reader, leaf, directory
 		var info *api.File
 		var chunkResp *http.Response
 		err = o.fs.pacer.Call(func() (bool, error) {
+			chunkOpts.Body = bytes.NewReader(chunk)
 			var err error
 			chunkResp, err = srv.CallJSON(ctx, &chunkOpts, nil, &info)
 			// 308 means continue uploading (incomplete)
@@ -1921,7 +1922,6 @@ func (o *Object) uploadResume(ctx context.Context, in io.Reader, leaf, directory
 				Method:  "PUT",
 				RootURL: location,
 				Path:    "",
-				Body:    bytes.NewReader([]byte{}), // Empty body
 				ExtraHeaders: map[string]string{
 					"Content-Range":  fmt.Sprintf("bytes */%d", size),
 					"Content-Length": "0",
@@ -1930,6 +1930,7 @@ func (o *Object) uploadResume(ctx context.Context, in io.Reader, leaf, directory
 
 			var finalInfo *api.File
 			err = o.fs.pacer.Call(func() (bool, error) {
+				finalOpts.Body = bytes.NewReader([]byte{})
 				finalResp, err := srv.CallJSON(ctx, &finalOpts, nil, &finalInfo)
 				if finalResp != nil && (finalResp.StatusCode == 200 || finalResp.StatusCode == 201) {
 					return false, err
